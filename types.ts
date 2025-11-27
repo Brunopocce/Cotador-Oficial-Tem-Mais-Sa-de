@@ -17,18 +17,23 @@ export type QuoteCategory = 'PF' | 'PME_1' | 'PME_2' | 'PME_30';
 export type CoparticipationType = 'full' | 'partial' | 'none';
 
 export interface User {
+  id?: string; // Supabase Auth UUID
   cpf: string;
-  password: string;
+  password?: string; 
   name: string;
-  email?: string; // Optional
-  phone?: string; // Optional
+  email?: string;
+  phone?: string;
   isAdmin?: boolean;
   status: 'approved' | 'pending' | 'rejected';
-  createdAt?: string; // ISO Date string
+  createdAt?: string;
+  
+  // Supabase DB fields mapping (snake_case)
+  is_admin?: boolean;
+  created_at?: string;
 }
 
 export interface PlanPriceTable {
-  [key: string]: number; // key is AgeRange value
+  [key: string]: number; 
 }
 
 export interface HealthPlan {
@@ -48,7 +53,7 @@ export interface HealthPlan {
 }
 
 export interface UserSelection {
-  [key: string]: number; // key is AgeRange value, value is quantity
+  [key: string]: number; 
 }
 
 export interface CalculatedPlan {

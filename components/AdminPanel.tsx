@@ -1,18 +1,68 @@
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { User } from '../types';
+import { supabase } from '../supabaseClient';
 
 interface AdminPanelProps {
-  users: User[];
-  onApprove: (cpf: string) => void;
-  onReject: (cpf: string) => void;
+  users: User[]; // Deprecated
+  onApprove: (cpf: string) => void; // Deprecated
+  onReject: (cpf: string) => void; // Deprecated
   onLogout: () => void;
+  onRefresh?: () => void;
 }
 
-export const AdminPanel: React.FC<AdminPanelProps> = ({ users, onApprove, onReject, onLogout }) => {
+export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout }) => {
+  const [realUsers, setRealUsers] = useState<User[]>([]);
   const [filter, setFilter] = useState<'pending' | 'all'>('pending');
-  const pendingUsers = users.filter(u => u.status === 'pending');
-  const allUsers = users.filter(u => !u.isAdmin);
+  
+  const fetchUsers = async () => {
+      const { data, error } = await supabase
+        .from('users')
+        .select('*')
+        .order('created_at', { ascending: false });
+      
+      if (data) {
+          // Map snake_case to camelCase
+          const mapped: User[] = data.map((u: any) => ({
+              ...u,
+              isAdmin: u.is_admin,
+              createdAt: u.created_at
+          }));
+          setRealUsers(mapped);
+      }
+  };
+
+  // Real-time listener for users
+  useEffect(() => {
+    fetchUsers();
+
+    const channel = supabase
+        .channel('public:users')
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'users' }, (payload) => {
+            console.log('Change received!', payload);
+            fetchUsers(); // Simple refetch on change
+        })
+        .subscribe();
+
+    return () => {
+        supabase.removeChannel(channel);
+    };
+  }, []);
+
+  const updateStatus = async (targetCpf: string, status: 'approved' | 'rejected') => {
+      // Find ID by CPF (since we need ID to update)
+      // Note: In production, passing ID directly to updateStatus is better
+      const userToUpdate = realUsers.find(u => u.cpf === targetCpf);
+      if (!userToUpdate || !userToUpdate.id) return;
+
+      await supabase
+        .from('users')
+        .update({ status: status })
+        .eq('id', userToUpdate.id);
+  };
+
+  const pendingUsers = realUsers.filter(u => u.status === 'pending');
+  const allUsers = realUsers.filter(u => !u.isAdmin);
 
   const displayedUsers = filter === 'pending' ? pendingUsers : allUsers;
 
@@ -21,7 +71,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ users, onApprove, onReje
       <header className="bg-white shadow-sm border-b border-gray-200">
         <div className="max-w-6xl mx-auto px-4 py-4 flex justify-between items-center">
           <div className="flex items-center gap-3">
-             <span className="text-xl font-bold text-[#003366]">Painel Administrativo</span>
+             <span className="text-xl font-bold text-[#003366]">Painel Administrativo (Supabase)</span>
           </div>
           <button 
             onClick={onLogout}
@@ -33,10 +83,14 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ users, onApprove, onReje
       </header>
 
       <main className="max-w-6xl mx-auto px-4 py-8">
+        
         <div className="flex items-center justify-between mb-6">
-          <h2 className="text-2xl font-bold text-gray-800">
-             {filter === 'pending' ? 'Solicitações Pendentes' : 'Todos os Usuários'}
-          </h2>
+          <div className="flex items-center gap-4">
+            <h2 className="text-2xl font-bold text-gray-800">
+                {filter === 'pending' ? 'Solicitações Pendentes' : 'Todos os Usuários'}
+            </h2>
+          </div>
+          
           <div className="flex bg-gray-200 p-1 rounded-lg">
              <button 
                 onClick={() => setFilter('pending')}
@@ -85,13 +139,13 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ users, onApprove, onReje
                       {user.status === 'pending' && (
                          <>
                             <button 
-                              onClick={() => onReject(user.cpf)}
+                              onClick={() => updateStatus(user.cpf, 'rejected')}
                               className="px-4 py-2 bg-red-50 text-red-700 font-bold rounded-lg hover:bg-red-100 transition-colors text-sm"
                             >
                               Recusar
                             </button>
                             <button 
-                              onClick={() => onApprove(user.cpf)}
+                              onClick={() => updateStatus(user.cpf, 'approved')}
                               className="px-4 py-2 bg-green-600 text-white font-bold rounded-lg hover:bg-green-700 transition-colors text-sm shadow-md"
                             >
                               Aprovar Acesso
@@ -100,7 +154,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ users, onApprove, onReje
                       )}
                       {user.status === 'approved' && (
                          <button 
-                            onClick={() => onReject(user.cpf)}
+                            onClick={() => updateStatus(user.cpf, 'rejected')}
                             className="text-sm text-red-600 hover:text-red-800 font-medium"
                          >
                             Revogar Acesso
@@ -108,7 +162,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ users, onApprove, onReje
                       )}
                       {user.status === 'rejected' && (
                          <button 
-                            onClick={() => onApprove(user.cpf)}
+                            onClick={() => updateStatus(user.cpf, 'approved')}
                             className="text-sm text-green-600 hover:text-green-800 font-medium"
                          >
                             Reativar Acesso

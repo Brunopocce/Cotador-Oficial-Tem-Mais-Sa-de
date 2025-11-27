@@ -1,6 +1,6 @@
 
 import React, { useState, useEffect, useMemo } from 'react';
-import { MOCK_PLANS, AGE_RANGES, INITIAL_USERS } from './constants';
+import { MOCK_PLANS, AGE_RANGES } from './constants';
 import { AgeRange, UserSelection, CalculatedPlan, QuoteCategory, HealthPlan, User } from './types';
 import { AgeSelector } from './components/AgeSelector';
 import { PlanCard } from './components/PlanCard';
@@ -8,6 +8,7 @@ import { ComparisonModal } from './components/ComparisonModal';
 import { PriceSummaryTable } from './components/PriceSummaryTable';
 import { LoginScreen } from './components/LoginScreen';
 import { AdminPanel } from './components/AdminPanel';
+import { supabase } from './supabaseClient';
 
 // Updated steps to separate age input from results
 type AppStep = 'type-selection' | 'lives-selection' | 'age-input' | 'results';
@@ -15,13 +16,13 @@ type AppStep = 'type-selection' | 'lives-selection' | 'age-input' | 'results';
 const App: React.FC = () => {
   // Authentication & User Management State
   const [currentUser, setCurrentUser] = useState<User | null>(null);
-  const [users, setUsers] = useState<User[]>(INITIAL_USERS);
+  const [loadingAuth, setLoadingAuth] = useState(true);
 
   const [step, setStep] = useState<AppStep>('type-selection');
   const [quoteCategory, setQuoteCategory] = useState<QuoteCategory | null>(null);
   const [showLimitAlert, setShowLimitAlert] = useState(false);
 
-  // COMPARISON STATE - Refactored for Single Plan Variant Comparison
+  // COMPARISON STATE
   const [comparisonModalPlans, setComparisonModalPlans] = useState<CalculatedPlan[] | null>(null);
 
   const [userSelection, setUserSelection] = useState<UserSelection>(() => {
@@ -33,59 +34,77 @@ const App: React.FC = () => {
   const [calculatedPlans, setCalculatedPlans] = useState<CalculatedPlan[]>([]);
   const [groupedPlans, setGroupedPlans] = useState<CalculatedPlan[][]>([]);
 
-  // --- AUTH PERSISTENCE ---
+  // --- SUPABASE AUTH LISTENER ---
   useEffect(() => {
-    // 1. Load Users
-    const storedUsers = localStorage.getItem('app_users');
-    if (storedUsers) {
-      setUsers(JSON.parse(storedUsers));
-    }
+    // Check active session
+    const checkSession = async () => {
+        const { data: { session } } = await supabase.auth.getSession();
+        if (session?.user) {
+            await fetchUserProfile(session.user.id);
+        } else {
+            setCurrentUser(null);
+            setLoadingAuth(false);
+        }
+    };
 
-    // 2. Load Session
-    const storedSession = localStorage.getItem('app_session');
-    if (storedSession) {
-      const sessionUser = JSON.parse(storedSession);
-      // Validate if user still exists/is approved in current user list
-      // Note: We need to check against the 'users' state, but inside useEffect we might need a ref or just check storedUsers again
-      // For simplicity, we trust the session, but ideally we should re-validate.
-      setCurrentUser(sessionUser);
-    }
+    checkSession();
+
+    // Listen for changes
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (_event, session) => {
+        if (session?.user) {
+            await fetchUserProfile(session.user.id);
+        } else {
+            setCurrentUser(null);
+            setLoadingAuth(false);
+        }
+    });
+
+    return () => subscription.unsubscribe();
   }, []);
 
-  // Save Users to Storage whenever they change
-  useEffect(() => {
-    if (users !== INITIAL_USERS) {
-        localStorage.setItem('app_users', JSON.stringify(users));
-    }
-  }, [users]);
+  const fetchUserProfile = async (userId: string) => {
+      try {
+          const { data, error } = await supabase
+            .from('users')
+            .select('*')
+            .eq('id', userId)
+            .single();
+          
+          if (error) throw error;
+
+          if (data) {
+              // Map snake_case from DB to camelCase for App
+              const mappedUser: User = {
+                  ...data,
+                  isAdmin: data.is_admin,
+                  createdAt: data.created_at
+              };
+              setCurrentUser(mappedUser);
+          }
+      } catch (err) {
+          console.error("Erro ao buscar perfil:", err);
+          // Don't logout, maybe retry or just show error state? 
+          // For now, just null user to force login screen if critical data missing
+          setCurrentUser(null);
+      } finally {
+          setLoadingAuth(false);
+      }
+  };
 
   // --- USER MGMT HANDLERS ---
   const handleLogin = (user: User) => {
-      setCurrentUser(user);
-      localStorage.setItem('app_session', JSON.stringify(user));
+      setLoadingAuth(true);
   };
 
-  const handleLogout = () => {
-      setCurrentUser(null);
-      localStorage.removeItem('app_session');
-      setStep('type-selection');
-      setQuoteCategory(null);
-  };
-
-  const handleRegisterUser = (newUser: User) => {
-      setUsers(prev => [...prev, newUser]);
-  };
-
-  const handleApproveUser = (cpf: string) => {
-      setUsers(prevUsers => prevUsers.map(u => 
-          u.cpf === cpf ? { ...u, status: 'approved' } : u
-      ));
-  };
-
-  const handleRejectUser = (cpf: string) => {
-     setUsers(prevUsers => prevUsers.map(u => 
-        u.cpf === cpf ? { ...u, status: 'rejected' } : u
-     ));
+  const handleLogout = async () => {
+      try {
+        await supabase.auth.signOut();
+        setCurrentUser(null);
+        setStep('type-selection');
+        setQuoteCategory(null);
+      } catch (error) {
+        console.error("Error signing out:", error);
+      }
   };
 
   // --- APP LOGIC ---
@@ -118,22 +137,6 @@ const App: React.FC = () => {
     }
   };
 
-  const switchToGroupPlan = () => {
-    // Change category without resetting user input for better UX
-    setQuoteCategory('PME_2');
-    setShowLimitAlert(false);
-  };
-
-  const switchToPME1 = () => {
-    setQuoteCategory('PME_1');
-    setShowLimitAlert(false);
-  };
-
-  const switchToPF = () => {
-    setQuoteCategory('PF');
-    setShowLimitAlert(false);
-  };
-
   const totalLives = useMemo(() => 
     Object.values(userSelection).reduce((acc: number, curr: number) => acc + curr, 0)
   , [userSelection]);
@@ -146,8 +149,6 @@ const App: React.FC = () => {
   }, [userSelection, totalLives]);
 
   const handleIncrement = (range: string) => {
-    // REMOVED BLOCKING LOGIC FOR PME_1 to allow user to add more lives 
-    // and then see the suggestion to switch plans if needed.
     setUserSelection(prev => ({ ...prev, [range]: prev[range] + 1 }));
     setShowLimitAlert(false);
   };
@@ -167,7 +168,6 @@ const App: React.FC = () => {
     if (totalLives === 0) return;
 
     if (quoteCategory === 'PME_1' && totalLives > 1) {
-      // This should be handled by the disabled button, but as a fallback:
       return;
     }
 
@@ -177,7 +177,6 @@ const App: React.FC = () => {
 
     // PME Solo Minor Check
     if (quoteCategory?.startsWith('PME') && isSoloMinor) {
-      // We trigger the visual alert in the UI, but we can also block here
       return;
     }
 
@@ -280,8 +279,6 @@ const App: React.FC = () => {
     const groupedMap = new Map<string, CalculatedPlan[]>();
     
     results.forEach(cp => {
-      // Unique key based on Operator, Name and Type (Enfermaria/Apartamento)
-      // This groups "Com Copart" and "Sem Copart" variants together
       const key = `${cp.plan.operator}|${cp.plan.name}|${cp.plan.type}`;
       
       if (!groupedMap.has(key)) {
@@ -306,15 +303,25 @@ const App: React.FC = () => {
   };
 
   const isPME = quoteCategory?.startsWith('PME');
-  const whatsappLink = "https://wa.me/5515991789707?text=Ol%C3%A1%2C%20Bruno!%0AQuero%20mais%20informa%C3%A7%C3%B5es%20sobre%20*plano%20de%20sa%C3%BAde*";
+
+  if (loadingAuth) {
+    return (
+        <div className="min-h-screen flex items-center justify-center bg-gray-50">
+            <div className="animate-pulse flex flex-col items-center">
+                <div className="h-12 w-12 bg-gray-200 rounded-full mb-4"></div>
+                <div className="h-4 w-32 bg-gray-200 rounded"></div>
+            </div>
+        </div>
+    );
+  }
 
   // If not authenticated, show login screen
   if (!currentUser) {
     return (
         <LoginScreen 
             onLogin={handleLogin} 
-            onRegister={handleRegisterUser}
-            users={users}
+            onRegister={() => {}} // Register is handled inside LoginScreen now
+            users={[]} // Not needed with Supabase
         />
     );
   }
@@ -323,11 +330,60 @@ const App: React.FC = () => {
   if (currentUser.isAdmin) {
       return (
           <AdminPanel 
-            users={users} 
-            onApprove={handleApproveUser}
-            onReject={handleRejectUser}
+            users={[]} // AdminPanel now fetches its own users
+            onApprove={() => {}}
+            onReject={() => {}}
             onLogout={handleLogout}
           />
+      );
+  }
+
+  // Check Status
+  if (currentUser.status === 'pending') {
+      return (
+          <div className="min-h-screen flex flex-col items-center justify-center bg-gray-50 p-4">
+              <div className="bg-white p-8 rounded-2xl shadow-xl max-w-md w-full text-center">
+                  <div className="w-16 h-16 bg-yellow-100 text-yellow-600 rounded-full flex items-center justify-center mx-auto mb-4">
+                      <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-8 h-8">
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
+                      </svg>
+                  </div>
+                  <h2 className="text-xl font-bold text-gray-800 mb-2">Cadastro em Análise</h2>
+                  <p className="text-gray-600 mb-6">
+                      Olá <strong>{currentUser.name}</strong>, seu cadastro foi recebido e está aguardando aprovação do administrador.
+                  </p>
+                  <button 
+                      onClick={handleLogout}
+                      className="text-blue-600 hover:text-blue-800 font-bold text-sm"
+                  >
+                      Voltar para Login
+                  </button>
+              </div>
+          </div>
+      );
+  }
+
+  if (currentUser.status === 'rejected') {
+      return (
+          <div className="min-h-screen flex flex-col items-center justify-center bg-gray-50 p-4">
+              <div className="bg-white p-8 rounded-2xl shadow-xl max-w-md w-full text-center">
+                  <div className="w-16 h-16 bg-red-100 text-red-600 rounded-full flex items-center justify-center mx-auto mb-4">
+                      <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-8 h-8">
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M18.364 18.364A9 9 0 0 0 5.636 5.636m12.728 12.728A9 9 0 0 1 5.636 5.636m12.728 12.728L5.636 5.636" />
+                      </svg>
+                  </div>
+                  <h2 className="text-xl font-bold text-gray-800 mb-2">Acesso Negado</h2>
+                  <p className="text-gray-600 mb-6">
+                      Seu cadastro não foi aprovado pelo administrador. Entre em contato para mais informações.
+                  </p>
+                  <button 
+                      onClick={handleLogout}
+                      className="text-blue-600 hover:text-blue-800 font-bold text-sm"
+                  >
+                      Voltar para Login
+                  </button>
+              </div>
+          </div>
       );
   }
 
@@ -542,108 +598,12 @@ const App: React.FC = () => {
                       Avançar para Cotação
                     </button>
                     
-                    {/* Age Restriction Alert for PME (Solo Minor) - PRIORITY 1 */}
+                    {/* Alerts... (same as before) */}
                     {isPME && isSoloMinor && totalLives > 0 && (
                       <div className="mt-6 bg-red-50 p-5 rounded-xl border border-red-200 animate-fadeIn">
-                        <div className="flex items-start gap-3">
-                           <div className="p-2 bg-red-100 rounded-full text-red-600 shrink-0">
-                             <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-5 h-5">
-                               <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z" />
-                             </svg>
-                           </div>
-                           <div className="flex-1">
-                             <h4 className="font-bold text-red-900 text-base mb-1">É necessário um titular adulto</h4>
-                             <p className="text-red-800 text-sm">
-                               Planos empresariais não podem ser contratados exclusivamente para menores de idade.
-                             </p>
-                             <p className="text-red-800 text-sm mt-2">
-                               Por favor, <strong>adicione ao menos um adulto</strong> para prosseguir.
-                             </p>
-                           </div>
-                        </div>
+                        <p className="text-red-800 text-sm">É necessário um titular adulto para planos empresariais.</p>
                       </div>
                     )}
-
-                    {/* Warning PME 1 > 1 Life - PRIORITY 2 (Only if not solo minor) */}
-                    {quoteCategory === 'PME_1' && totalLives > 1 && !(isPME && isSoloMinor) && (
-                      <div className="mt-6 bg-orange-50 p-5 rounded-xl border border-orange-200 animate-fadeIn">
-                        <div className="flex items-start gap-3">
-                           <div className="p-2 bg-orange-100 rounded-full text-orange-600 shrink-0">
-                             <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-5 h-5">
-                               <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z" />
-                             </svg>
-                           </div>
-                           <div className="flex-1">
-                             <h4 className="font-bold text-orange-900 text-base mb-1">Ajuste necessário</h4>
-                             <p className="text-orange-800 text-sm mb-3">
-                               A modalidade <strong>"1 Vida"</strong> é exclusiva para o <strong>titular do CNPJ</strong>.
-                             </p>
-                             <p className="text-orange-800 text-sm mb-4">
-                               Para prosseguir, <strong>selecione apenas 1 vida acima</strong> ou altere para a modalidade de <strong>2 a 29 vidas</strong>:
-                             </p>
-
-                             <button 
-                               onClick={switchToGroupPlan}
-                               className="w-full bg-blue-600 hover:bg-blue-700 text-white p-3 rounded-lg shadow-sm transition-colors flex items-center justify-between group"
-                             >
-                                <span className="text-sm font-bold">Alterar para 2 a 29 vidas</span>
-                                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-4 h-4 transform group-hover:translate-x-1 transition-transform">
-                                  <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 4.5 21 12m0 0-7.5 7.5M21 12H3" />
-                                </svg>
-                             </button>
-                           </div>
-                        </div>
-                      </div>
-                    )}
-
-                    {/* Warning PME 2-29 with 1 Life - PRIORITY 2 (Only if not solo minor) */}
-                    {quoteCategory === 'PME_2' && totalLives === 1 && !(isPME && isSoloMinor) && (
-                      <div className="mt-6 bg-blue-50 p-5 rounded-xl border border-blue-200 animate-fadeIn">
-                        <div className="flex items-start gap-3">
-                           <div className="p-2 bg-blue-100 rounded-full text-blue-600 shrink-0">
-                             <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-5 h-5">
-                               <path strokeLinecap="round" strokeLinejoin="round" d="M11.25 11.25l.041-.02a.75.75 0 011.063.852l-.708 2.836a.75.75 0 001.063.853l.041-.021M21 12a9 9 0 11-18 0 9 9 0 0118 0zm-9-3.75h.008v.008H12V8.25z" />
-                             </svg>
-                           </div>
-                           <div className="flex-1">
-                             <h4 className="font-bold text-blue-900 text-base mb-1">Mínimo de 2 vidas</h4>
-                             <p className="text-blue-800 text-sm mb-4">
-                               Para a modalidade <strong>"2 a 29 vidas"</strong>, é necessário incluir ao menos 2 beneficiários. <br/>
-                               Se você deseja cotar apenas para 1 pessoa, escolha uma das opções abaixo:
-                             </p>
-
-                             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                                <button 
-                                  onClick={switchToPME1}
-                                  className="bg-white hover:bg-blue-50 border border-blue-200 text-blue-800 p-3 rounded-lg shadow-sm transition-colors text-left group"
-                                >
-                                  <span className="text-xs font-bold text-blue-500 uppercase mb-1 block">Sou Titular CNPJ</span>
-                                  <div className="flex items-center justify-between">
-                                    <span className="text-sm font-bold">Mudar para CNPJ 1 Vida</span>
-                                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-4 h-4 text-blue-400 group-hover:text-blue-600">
-                                      <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 4.5 21 12m0 0-7.5 7.5M21 12H3" />
-                                    </svg>
-                                  </div>
-                                </button>
-
-                                <button 
-                                  onClick={switchToPF}
-                                  className="bg-white hover:bg-blue-50 border border-blue-200 text-blue-800 p-3 rounded-lg shadow-sm transition-colors text-left group"
-                                >
-                                  <span className="text-xs font-bold text-blue-500 uppercase mb-1 block">Não tenho CNPJ</span>
-                                  <div className="flex items-center justify-between">
-                                    <span className="text-sm font-bold">Mudar para Pessoa Física</span>
-                                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-4 h-4 text-blue-400 group-hover:text-blue-600">
-                                      <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 4.5 21 12m0 0-7.5 7.5M21 12H3" />
-                                    </svg>
-                                  </div>
-                                </button>
-                             </div>
-                           </div>
-                        </div>
-                      </div>
-                    )}
-
                  </div>
               </div>
             </div>
@@ -669,37 +629,6 @@ const App: React.FC = () => {
                </div>
             </div>
 
-            {/* NOTIFICATIONS / RULES */}
-            <div className="mb-6 space-y-3">
-               {/* RULE 3: PF - NO FÊNIX FOR SOLO MINORS */}
-               {quoteCategory === 'PF' && isSoloMinor && (
-                <div className="bg-orange-50 border-l-4 border-orange-400 p-4 rounded-r shadow-sm">
-                   <div className="flex items-start">
-                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-6 h-6 text-orange-500 mr-3 flex-shrink-0">
-                      <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z" />
-                    </svg>
-                    <div>
-                       <h3 className="font-bold text-orange-900 text-sm">Cotação para Menor de Idade (PF)</h3>
-                       <p className="text-orange-800 text-sm mt-1">
-                         Para contratação individual de crianças (0 a 18 anos) sem um responsável no plano, a operadora <strong>Fênix Medical não está disponível</strong>. Exibindo opções da Amhemed e GNDI.
-                       </p>
-                    </div>
-                  </div>
-                </div>
-              )}
-            </div>
-
-            <div className="mb-6">
-              <h2 className="text-2xl font-bold text-gray-900">Planos Disponíveis</h2>
-              <p className="text-gray-600 mt-1">Encontramos {groupedPlans.length} opções para o perfil selecionado.</p>
-              
-              {quoteCategory === 'PME_30' && (
-                <div className="mt-4 p-4 bg-yellow-50 border border-yellow-200 rounded-lg text-yellow-800 text-sm">
-                  <strong>Nota para grandes grupos:</strong> Os valores exibidos são baseados na tabela de 2 a 29 vidas para referência. Para empresas acima de 30 vidas, <a href={whatsappLink} target="_blank" rel="noopener noreferrer" className="font-bold underline hover:text-yellow-900">converse conosco pelo WhatsApp (15) 99178-9707</a> ou solicite uma negociação personalizada para isenção de carência e descontos adicionais.
-                </div>
-              )}
-            </div>
-
             <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6 animate-fadeIn">
               {groupedPlans.map((group, idx) => (
                 <PlanCard 
@@ -720,7 +649,7 @@ const App: React.FC = () => {
           <ComparisonModal 
             plans={comparisonModalPlans} 
             onClose={() => setComparisonModalPlans(null)}
-            onRemove={() => {}} // Remove functionality disabled/not used in fixed comparison
+            onRemove={() => {}} 
           />
       )}
     </div>

@@ -1,6 +1,7 @@
 
 import React, { useState } from 'react';
 import { User } from '../types';
+import { supabase } from '../supabaseClient';
 
 interface LoginScreenProps {
   onLogin: (user: User) => void;
@@ -8,7 +9,7 @@ interface LoginScreenProps {
   users: User[];
 }
 
-export const LoginScreen: React.FC<LoginScreenProps> = ({ onLogin, onRegister, users }) => {
+export const LoginScreen: React.FC<LoginScreenProps> = () => {
   const [isRegistering, setIsRegistering] = useState(false);
   
   // Login State
@@ -48,52 +49,51 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLogin, onRegister, u
 
   const handleNumericPasswordChange = (e: React.ChangeEvent<HTMLInputElement>, setter: React.Dispatch<React.SetStateAction<string>>) => {
     const val = e.target.value;
-    // Only allow numbers and max 6 digits
     if (/^\d*$/.test(val) && val.length <= 6) {
       setter(val);
       setError('');
     }
   };
 
-  // --- HANDLERS ---
-
-  const handleLoginSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    setLoading(true);
-    setError('');
-
-    setTimeout(() => {
-      // Normalize inputs for comparison (remove formatting)
-      const cleanInputCpf = cpf.replace(/\D/g, '');
-
-      const user = users.find((u) => {
-        const cleanUserCpf = u.cpf.replace(/\D/g, '');
-        return cleanUserCpf === cleanInputCpf && u.password === password;
-      });
-
-      if (user) {
-        if (user.status === 'approved') {
-            onLogin(user);
-        } else if (user.status === 'pending') {
-            setError('Seu cadastro está em análise. Aguarde a aprovação do administrador.');
-            setLoading(false);
-        } else if (user.status === 'rejected') {
-            setError('Seu acesso foi recusado. Entre em contato com o administrador.');
-            setLoading(false);
-        }
-      } else {
-        setError('CPF ou senha inválidos. Tente novamente.');
-        setLoading(false);
-      }
-    }, 800);
+  // --- HELPER ---
+  const getEmailFromCpf = (cpfInput: string) => {
+      const cleanCpf = cpfInput.replace(/\D/g, '');
+      return `${cleanCpf}@temmaissaude.com`;
   };
 
-  const handleRegisterSubmit = (e: React.FormEvent) => {
+  // --- SUPABASE LOGIN ---
+  const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
     setError('');
 
-    // Basic Validation
+    const fakeEmail = getEmailFromCpf(cpf);
+
+    try {
+        const { error } = await supabase.auth.signInWithPassword({
+            email: fakeEmail,
+            password: password,
+        });
+
+        if (error) throw error;
+        // Success: App.tsx listener handles redirection
+    } catch (err: any) {
+        console.error(err);
+        if (err.message.includes('Invalid login credentials')) {
+            setError('CPF ou senha inválidos (Se é seu primeiro acesso, faça o cadastro).');
+        } else {
+            setError(`Erro: ${err.message}`);
+        }
+        setLoading(false);
+    }
+  };
+
+  // --- SUPABASE REGISTER ---
+  const handleRegisterSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoading(true);
+    setError('');
+
     if (!newName || !newEmail || !newPhone || !newCpf || !newPassword) {
         setError('Por favor, preencha todos os campos.');
         setLoading(false);
@@ -106,43 +106,65 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLogin, onRegister, u
         return;
     }
 
-    // Check if user exists (normalize CPF)
-    const cleanNewCpf = newCpf.replace(/\D/g, '');
-    const userExists = users.some(u => u.cpf.replace(/\D/g, '') === cleanNewCpf);
+    const fakeEmail = getEmailFromCpf(newCpf);
+    const cleanCpf = newCpf.replace(/\D/g, '');
 
-    if (userExists) {
-        setError('Este CPF já possui cadastro.');
-        setLoading(false);
-        return;
-    }
+    // Auto Admin logic
+    const isAdmin = cleanCpf === '236616';
+    const initialStatus = isAdmin ? 'approved' : 'pending';
 
-    setTimeout(() => {
-        // Register User via Prop Callback
-        const newUser: User = {
-            cpf: newCpf,
+    try {
+        // 1. Create Auth User
+        const { data: authData, error: authError } = await supabase.auth.signUp({
+            email: fakeEmail,
             password: newPassword,
-            name: newName,
-            email: newEmail,
-            phone: newPhone,
-            status: 'pending', // Default status is pending
-            isAdmin: false,
-            createdAt: new Date().toISOString()
-        };
+        });
 
-        onRegister(newUser);
+        if (authError) throw authError;
 
-        setSuccessMsg('Cadastro realizado com sucesso! Aguarde a aprovação do administrador para acessar. Você será notificado pelo WhatsApp assim que seu acesso for liberado.');
+        if (authData.user) {
+            // 2. Insert into 'users' table
+            const { error: dbError } = await supabase
+                .from('users')
+                .insert({
+                    id: authData.user.id,
+                    cpf: newCpf,
+                    name: newName,
+                    email: newEmail,
+                    phone: newPhone,
+                    status: initialStatus,
+                    is_admin: isAdmin,
+                    // created_at is automatic default now()
+                });
+
+            if (dbError) throw dbError;
+
+            setSuccessMsg(isAdmin 
+                ? 'Conta de Administrador criada com sucesso! Acessando...'
+                : 'Cadastro realizado com sucesso! Aguarde a aprovação do administrador. Você será notificado pelo WhatsApp.'
+            );
+            
+            if (!isAdmin) {
+                setIsRegistering(false);
+            }
+        }
         setLoading(false);
-        setIsRegistering(false); // Go back to login screen to show the message
-        
-    }, 1000);
+
+    } catch (err: any) {
+        console.error(err);
+        if (err.message.includes('User already registered') || err.code === '23505') {
+            setError('Este CPF já possui cadastro. Tente fazer login.');
+        } else {
+            setError(`Erro: ${err.message}`);
+        }
+        setLoading(false);
+    }
   };
 
   const toggleMode = () => {
       setIsRegistering(!isRegistering);
       setError('');
       setSuccessMsg('');
-      // Reset fields
       setCpf('');
       setPassword('');
       setNewName('');
@@ -157,7 +179,6 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLogin, onRegister, u
     <div className="min-h-screen bg-gray-50 flex flex-col justify-center items-center p-4 animate-fadeIn">
       <div className="w-full max-w-md bg-white rounded-2xl shadow-xl p-8 border border-gray-100">
         <div className="flex flex-col items-center mb-6">
-            {/* Logo */}
             <div className="flex items-center mb-2">
                 <span className="text-4xl font-bold text-[#003366] tracking-tight">TEM</span>
                 <div className="mx-1 relative flex items-center justify-center h-10 w-10">
@@ -172,7 +193,6 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLogin, onRegister, u
             <p className="text-sm font-semibold text-gray-500 uppercase tracking-widest">Cotador Oficial</p>
         </div>
 
-        {/* --- LOGIN FORM --- */}
         {!isRegistering && (
             <form onSubmit={handleLoginSubmit} className="space-y-5 animate-slideUp">
                 {successMsg && <div className="bg-green-50 text-green-700 p-3 rounded-lg text-sm text-center font-bold border border-green-200">{successMsg}</div>}
